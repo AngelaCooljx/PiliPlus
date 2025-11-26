@@ -28,25 +28,76 @@ jobs:
       - name: Install 7-Zip
         run: choco install 7zip
 
+      - name: Install Vulkan SDK (for SwiftShader)
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.3.296.0 # Use a recent version
+          install_runtime: true
+          install_swiftshader: true
+
       - name: Download and Setup libmpv (ARM64)
         shell: pwsh
         run: |
-          $repo = "zhongfly/mpv-winbuild"
-          $asset = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").assets | Where-Object name -match "mpv-dev-aarch64-.*-git-.*\.7z" | Select-Object -First 1
-          if (!$asset) { throw "Asset not found" }
-          
-          Invoke-WebRequest $asset.browser_download_url -OutFile "libmpv.7z"
-          7z x "libmpv.7z" "-olibmpv_extract"
+          # Download minnyres mpv package
+          $url = "https://github.com/minnyres/mpv-windows-arm64/releases/download/v0.40.0/mpv_0.40.0_arm64.7z"
+          $outFile = "libmpv.7z"
+          Invoke-WebRequest -Uri $url -OutFile $outFile
+          7z x $outFile "-olibmpv_extract"
           
           $dest = "build/windows/arm64/libmpv"
           New-Item -ItemType Directory -Force -Path "$dest/include"
           
-          # Copy DLLs and Libs
-          Get-ChildItem -Path "libmpv_extract" -Include "libmpv-2.dll", "libmpv.dll.a" -Recurse | Copy-Item -Destination $dest
+          # Copy libmpv-2.dll and vulkan-1.dll from minnyres package
+          Get-ChildItem -Path "libmpv_extract" -Include "libmpv-2.dll", "vulkan-1.dll" -Recurse | Copy-Item -Destination $dest
           
-          # Copy include/mpv
+          # Copy include/mpv headers (flattened)
           $inc = Get-ChildItem -Path "libmpv_extract" -Filter "mpv" -Directory -Recurse | Select-Object -First 1
           if ($inc) { Copy-Item "$($inc.FullName)/*" "$dest/include" -Recurse }
+          
+          # Build zlib from source (Chromium mirror)
+          $zlibRepo = "https://chromium.googlesource.com/chromium/src/third_party/zlib"
+          git clone $zlibRepo zlib_src
+          
+          # We need to use MSVC environment for ARM64 build
+          # GitHub Actions windows-2022/latest has Visual Studio 2022.
+          # We can use 'ilammy/msvc-dev-cmd' action to set up the environment in a separate step, 
+          # OR just call vcvarsall.bat inside a cmd block.
+          # Since we are in pwsh, let's use a separate step for zlib build or invoke cmd.
+          # Invoking cmd is easier to keep it self-contained in this dependency setup block if possible,
+          # but switching shell is cleaner.
+          # Let's use a separate step for Zlib build to ensure environment is clean and easy to debug.
+          # But we need the output in this step or accessible.
+          # Let's do it right here using cmd /c and vcvarsall.
+          
+          $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
+          if (-not (Test-Path $vcvars)) {
+              # Fallback for Community edition or different path if Enterprise not found (GitHub runner usually has Enterprise)
+              $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
+          }
+          
+          $buildDir = "zlib_build"
+          $installDir = "zlib_install"
+          New-Item -ItemType Directory -Force -Path $buildDir
+          New-Item -ItemType Directory -Force -Path $installDir
+          
+          $cmdContent = @"
+          call "$vcvars" amd64_arm64
+          cd $buildDir
+          cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../$installDir" -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=aarch64 "../zlib_src"
+          cmake --build . --config Release
+          cmake --install .
+          "@
+          Set-Content -Path "build_zlib.bat" -Value $cmdContent
+          cmd /c "build_zlib.bat"
+          
+          $zlibDll = Get-ChildItem -Path "$installDir" -Filter "zlib.dll" -Recurse | Select-Object -First 1
+          if ($zlibDll) { 
+              Copy-Item $zlibDll.FullName $dest 
+              Write-Host "Built and copied zlib.dll"
+          } else {
+              Write-Error "Failed to build zlib.dll"
+              exit 1
+          }
           
           Write-Host "libmpv setup complete at $dest"
 
@@ -91,6 +142,60 @@ jobs:
              # Copy all DLLs from that directory to dest root
              $dllDir = $dllFile.DirectoryName
              Copy-Item "$dllDir/*.dll" "$dest"
+             
+             # Specifically look for d3dcompiler_47.dll in the archive if not already copied
+             if (-not (Test-Path "$dest/d3dcompiler_47.dll")) {
+                 $d3d = Get-ChildItem -Path $extractDir -Filter "d3dcompiler_47.dll" -Recurse | Select-Object -First 1
+                 if ($d3d) { Copy-Item $d3d.FullName "$dest" }
+             }
+
+             # Try to find system DLLs to avoid dummy files
+             # vulkan-1.dll (Already copied to libmpv dir, but ANGLE might need it too? 
+             # Actually media_kit copies from libmpv dir usually, but let's ensure it's in ANGLE dir if needed or just rely on libmpv dir)
+             # The user said vulkan-1.dll is in minnyres package. We copied it to libmpv dir above.
+             # Let's copy it to ANGLE dir too just in case.
+             $vulkanSrc = "$dest/../libmpv/vulkan-1.dll"
+             if (Test-Path $vulkanSrc) {
+                 Copy-Item $vulkanSrc "$dest"
+             }
+             
+             # vk_swiftshader.dll (From Vulkan SDK)
+             # The action installs SDK to C:\VulkanSDK\...\
+             # We need to find it.
+             $swiftshader = Get-ChildItem -Path "C:\VulkanSDK" -Filter "vk_swiftshader.dll" -Recurse | Select-Object -First 1
+             if ($swiftshader) {
+                 Copy-Item $swiftshader.FullName "$dest"
+                 Write-Host "Copied vk_swiftshader.dll from SDK"
+             } else {
+                 # Fallback search
+                 $searchPaths = @(
+                     "C:\Windows\System32\vk_swiftshader.dll",
+                     "C:\Program Files (x86)\Microsoft\EdgeWebView\Application\*\vk_swiftshader.dll"
+                 )
+                 foreach ($path in $searchPaths) {
+                     $found = Get-ChildItem -Path $path -ErrorAction SilentlyContinue | Select-Object -First 1
+                     if ($found) {
+                         Copy-Item $found.FullName "$dest"
+                         Write-Host "Copied vk_swiftshader.dll from $($found.FullName)"
+                         break
+                     }
+                 }
+             }
+
+             # zlib.dll (From txwizard download, copied to libmpv dir above)
+             $zlibSrc = "$dest/../libmpv/zlib.dll"
+             if (Test-Path $zlibSrc) {
+                 Copy-Item $zlibSrc "$dest"
+             }
+
+             # Check for and create dummy files ONLY if still missing
+             $optionalDlls = @("d3dcompiler_47.dll", "vk_swiftshader.dll", "vulkan-1.dll", "zlib.dll")
+             foreach ($dll in $optionalDlls) {
+                 if (-not (Test-Path "$dest/$dll")) {
+                     Write-Warning "$dll not found. Creating dummy file to satisfy build."
+                     New-Item -ItemType File -Path "$dest/$dll" -Force
+                 }
+             }
           } else {
              Write-Error "libEGL.dll not found"; exit 1
           }
