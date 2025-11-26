@@ -23,5 +23,5 @@ jobs:
 
       - name: Check Vulkan SDK
         run: |
-          tree C:\VulkanSDK
-          tree C:\swiftshader
+          tree C:\VulkanSDK /f
+          tree C:\swiftshader /f
