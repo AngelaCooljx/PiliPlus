@@ -15,71 +15,13 @@ jobs:
     name: Release Windows arm64
     runs-on: windows-11-arm
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
       - name: Install Vulkan SDK (for vulkan runtime 'vulkan-1.dll' and SwiftShader 'vk_swiftshader.dll')
         uses: jakoch/install-vulkan-sdk-action@v1
         with:
           install_runtime_only: true
           install_swiftshader: true
 
-      - name: Setup flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: master
-
-      - name: Add fastforge and Inno Setup
+      - name: Check Vulkan SDK
         run: |
-          dart pub global activate fastforge
-          choco install innosetup
-
-      - name: Add Chinese language file for Inno Setup
-        run: |
-          Copy-Item "windows/packaging/exe/ChineseSimplified.isl" "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
-        shell: pwsh
-
-      - name: Set and Extract version
-        shell: pwsh
-        run: lib/scripts/build.ps1
-
-      - name: Build Windows ARM64
-        run: |
-          fastforge package --platform windows --targets exe --flutter-build-args="dart-define-from-file=pili_release.json"
-
-      - name: Prepare Upload
-        run: |
-          mkdir -p Release/PiliPlus-Win-Arm64
-          mkdir -p PiliPlus-Win-Arm64-Setup
-          mv build/windows/arm64/runner/Release/* Release/PiliPlus-Win-Arm64/
-          mv dist/**/*.exe PiliPlus-Win-Arm64-Setup/PiliPlus_windows_${{env.version}}_arm64_setup.exe
-
-      - name: Compress
-        if: ${{ github.event.inputs.tag != '' }}
-        run: |
-          Compress-Archive -Path "Release/PiliPlus-Win-Arm64" -DestinationPath "PiliPlus_windows_${{env.version}}_arm64.zip"
-        shell: pwsh
-
-      - name: Release
-        if: ${{ github.event.inputs.tag != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: ${{ github.event.inputs.tag }}
-          files: |
-            PiliPlus_windows_*_arm64.zip
-            PiliPlus-Win-Arm64-Setup/PiliPlus_windows_*_arm64_setup.exe
-
-      - name: Upload windows file release
-        uses: actions/upload-artifact@v4
-        with:
-          name: Windows-file-arm64-release
-          path: Release
-
-      - name: Upload windows setup release
-        uses: actions/upload-artifact@v4
-        with:
-          name: Windows-setup-arm64-release
-          path: PiliPlus-Win-Arm64-Setup
+          tree C:\VulkanSDK
+          tree C:\swiftshader
